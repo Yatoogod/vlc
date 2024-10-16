@@ -62,7 +62,7 @@ async def generate_link(update: Update, context):
     # Start cleanup in a separate thread
     threading.Thread(target=cleanup_file, args=(video_path, video_id)).start()
     
-    stream_link = f"http://your-server-ip:5000/stream/{video_id}"
+    stream_link = f"http://31.220.49.82:5000/stream/{video_id}"
     
     await update.message.reply_text(f"Your streaming link: {stream_link}\n"
                                     f"Link will expire in 12 hours.")
