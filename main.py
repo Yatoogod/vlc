@@ -1,162 +1,88 @@
-import requests
-import json
-import logging
-from telegram import Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-from telegram import InputFile
 import os
+import time
+import threading
+from flask import Flask, send_file
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+import boto3
+from datetime import datetime, timedelta
 
-# Set your user ID as the bot owner (replace with your actual Telegram user ID)
-OWNER_ID = 6905063305  # Replace with your actual Telegram user ID
-sudo_users = []
+# Configuration
+TEMP_FOLDER = "./videos"
+EXPIRY_TIME = 12 * 60 * 60  # 12 hours in seconds
 
-# File to store sudo users
-SUDO_FILE = 'sudo_users.json'
+# Flask app for streaming
+app = Flask(__name__)
+stored_videos = {}
 
-# Configure logging
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                    level=logging.INFO)
+# Initialize S3
+s3_client = boto3.client('s3')
+BUCKET_NAME = 'your-s3-bucket-name'
 
-logger = logging.getLogger(__name__)
+@app.route('/stream/<video_id>')
+def stream(video_id):
+    if video_id in stored_videos:
+        return send_file(stored_videos[video_id], mimetype='video/mp4')
+    return "Video not found", 404
 
-# Load sudo users from the file if it exists
-def load_sudo_users():
-    global sudo_users
-    try:
-        with open(SUDO_FILE, 'r') as f:
-            sudo_users = json.load(f)
-    except FileNotFoundError:
-        sudo_users = []
+# Clean up after 12 hours
+def cleanup_file(file_path, video_id):
+    time.sleep(EXPIRY_TIME)
+    if os.path.exists(file_path):
+        os.remove(file_path)
+        stored_videos.pop(video_id, None)
 
-# Save sudo users to the file
-def save_sudo_users():
-    with open(SUDO_FILE, 'w') as f:
-        json.dump(sudo_users, f)
+# Telegram bot handlers
+async def start(update: Update, context):
+    await update.message.reply_text("Send a video and use /gen to create a streaming link.")
 
-# Check if the user is the owner or a sudo user
-def is_authorized(user_id):
-    return user_id == OWNER_ID or user_id in sudo_users
-
-# /start command handler (only for authorized users)
-def start(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if is_authorized(user_id):
-        update.message.reply_text("Welcome to the VLC Streaming Bot! Send me a video and reply with /gen to get the streaming link.")
-    else:
-        update.message.reply_text("You are not authorized to use this bot.")
-
-# /addsudo command to add a sudo user (only for owner)
-def add_sudo(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if user_id != OWNER_ID:
-        update.message.reply_text("Only the bot owner can add sudo users.")
-        return
-
-    if len(context.args) != 1:
-        update.message.reply_text("Usage: /addsudo <user_id>")
-        return
-
-    try:
-        new_sudo_id = int(context.args[0])
-        if new_sudo_id in sudo_users:
-            update.message.reply_text("This user is already a sudo user.")
-        else:
-            sudo_users.append(new_sudo_id)
-            save_sudo_users()
-            update.message.reply_text(f"User {new_sudo_id} has been added as a sudo user.")
-    except ValueError:
-        update.message.reply_text("Please provide a valid user ID.")
-
-# /gen command handler to generate a VLC link (only for authorized users)
-def gen(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if not is_authorized(user_id):
-        update.message.reply_text("You are not authorized to use this command.")
-        return
-
-    if update.message.reply_to_message and update.message.reply_to_message.video:
-        video_file = update.message.reply_to_message.video.get_file()
-        video_file.download(f"/path/to/your/videos/{video_file.file_id}.mp4")
-
-        # Create a VLC streaming link
-        link = f"http://yourserver.com/video/{video_file.file_id}.mp4"
-        update.message.reply_text(f"Here is your VLC Streaming Link: {link}")
-    else:
-        update.message.reply_text("Please reply to a video with the /gen command to get the streaming link.")
-
-# /l or /leech command to download and upload a file
-def leech(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if not is_authorized(user_id):
-        update.message.reply_text("You are not authorized to use this command.")
-        return
-
-    if len(context.args) == 0:
-        update.message.reply_text("Please provide a direct download link. Usage: /leech <url>")
-        return
-
-    # Get the download link from the command
-    download_url = context.args[0]
-    file_name = download_url.split('/')[-1]  # Extract file name from URL
-
-    try:
-        # Download the file
-        response = requests.get(download_url, stream=True)
-        if response.status_code == 200:
-            file_path = f"/path/to/your/downloads/{file_name}"  # Temporary storage
-
-            # Save the file locally
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-
-            # Send the file to the user
-            with open(file_path, 'rb') as f:
-                update.message.reply_document(document=InputFile(f), filename=file_name)
-
-            # Optionally: Delete the file after uploading to save space
-            os.remove(file_path)
-
-        else:
-            update.message.reply_text(f"Failed to download the file. Status code: {response.status_code}")
-
-    except Exception as e:
-        update.message.reply_text(f"Error occurred while downloading the file: {str(e)}")
-
-# Handler for receiving videos (only for authorized users)
-def video_handler(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if is_authorized(user_id):
-        update.message.reply_text("Video received! Now, reply to this video with the /gen command to generate a streaming link.")
-    else:
-        update.message.reply_text("You are not authorized to send videos to this bot.")
-
-# Main function to start the bot
-def main():
-    # Load sudo users from the file
-    load_sudo_users()
-
-    # Create the Updater and pass it your bot's token
-    updater = Updater('7703993140:AAEuUQDfAFCp_lXDfmfcxwgEH1k9oC_m3Oc', use_context=True)
-    dp = updater.dispatcher
-
-    # Register command handlers
-    dp.add_handler(CommandHandler('start', start))
-    dp.add_handler(CommandHandler('addsudo', add_sudo))
-    dp.add_handler(CommandHandler('gen', gen))
-    dp.add_handler(CommandHandler(['l', 'leech'], leech))
-
-    # Register handler to receive videos
-    dp.add_handler(MessageHandler(Filters.video, video_handler))
-
-    # Start the bot
-    updater.start_polling()
+async def handle_video(update: Update, context):
+    video = update.message.video
+    if not os.path.exists(TEMP_FOLDER):
+        os.makedirs(TEMP_FOLDER)
     
-    # Log a message that the bot has started
-    logger.info("Bot started succesfully")
+    video_file = await update.message.bot.get_file(video.file_id)
+    video_path = os.path.join(TEMP_FOLDER, f"{video.file_id}.mp4")
+    
+    # Download the video file
+    await video_file.download_to_drive(video_path)
+    
+    context.user_data['video_path'] = video_path
+    await update.message.reply_text(f"Video uploaded. Use /gen to create a streaming link.")
 
-    # Run the bot until you press Ctrl-C or the process receives SIGINT, SIGTERM or SIGABRT
-    updater.idle()
+async def generate_link(update: Update, context):
+    if 'video_path' not in context.user_data:
+        await update.message.reply_text("Please upload a video first.")
+        return
+    
+    video_path = context.user_data['video_path']
+    video_id = os.path.basename(video_path).split(".")[0]
+    stored_videos[video_id] = video_path
+    
+    # Start cleanup in a separate thread
+    threading.Thread(target=cleanup_file, args=(video_path, video_id)).start()
+    
+    stream_link = f"http://your-server-ip:5000/stream/{video_id}"
+    
+    await update.message.reply_text(f"Your streaming link: {stream_link}\n"
+                                    f"Link will expire in 12 hours.")
+    
+# Main function to run the bot
+def main():
+    # Create the bot
+    application = ApplicationBuilder().token("6264504776:AAFPKj38UwNcA_ARSk0ZlLfc2nlJtxfPbGU").build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    application.add_handler(CommandHandler("gen", generate_link))
+    
+    # Start the bot
+    application.run_polling()
 
 if __name__ == "__main__":
-    main()
+    # Start the Telegram bot in a separate thread
+    bot_thread = threading.Thread(target=main)
+    bot_thread.start()
+    
+    # Start Flask app to serve the video files
+    app.run(host='0.0.0.0', port=5000)
